@@ -9,9 +9,21 @@ import {
   EnhancedSearchAnalyticsSchema,
   QuickWinsDetectionSchema,
   SubmitSitemapSchema,
+  InspectBatchSchema,
+  IndexNowSubmitSchema,
 } from './schemas.js';
 import { z } from 'zod';
 import { SearchConsoleService } from './search-console.js';
+import { fetchSitemapUrls } from './sitemap.js';
+import { submitIndexNow } from './indexnow.js';
+
+/** URLs from an explicit list and/or a sitemap (filtered by lastmod), de-duplicated in order. */
+async function resolveUrls(args: { urls?: string[]; sitemapUrl?: string; lastmodOnOrAfter?: string }): Promise<string[]> {
+  const fromSitemap = args.sitemapUrl
+    ? (await fetchSitemapUrls(args.sitemapUrl, args.lastmodOnOrAfter)).map((e) => e.loc)
+    : [];
+  return [...new Set([...(args.urls ?? []), ...fromSitemap])];
+}
 
 export function createServer(credentials: string): Server {
   if (!credentials) {
@@ -72,8 +84,21 @@ export function createServer(credentials: string): Server {
         },
         {
           name: 'submit_sitemap',
-          description: 'Submit a sitemap for a site in Google Search Console',
+          description:
+            'Submit (or resubmit) a sitemap for a site in Google Search Console. Needs Full or Owner permission on the property. Resubmitting after a deploy is how Google is told that the <lastmod> dates changed.',
           inputSchema: zodToJsonSchema(SubmitSitemapSchema),
+        },
+        {
+          name: 'inspect_batch',
+          description:
+            'Inspect many URLs with the URL Inspection API and summarise them: counts by coverage state (indexed, crawled/discovered but not indexed, unknown to Google), canonical mismatches, and one row per URL. URLs come from a list, a sitemap, or the sitemap entries whose <lastmod> is on or after a date. Read-only; uses the 2,000-a-day inspection quota.',
+          inputSchema: zodToJsonSchema(InspectBatchSchema),
+        },
+        {
+          name: 'indexnow_submit',
+          description:
+            'Notify IndexNow engines (Bing, Yandex, Seznam, Naver; not Google) that URLs were added, changed or removed. URLs come from a list, a sitemap, or the sitemap entries whose <lastmod> is on or after a date. Does not use Google credentials.',
+          inputSchema: zodToJsonSchema(IndexNowSubmitSchema),
         },
       ],
     };
@@ -349,6 +374,62 @@ export function createServer(credentials: string): Server {
                 text: JSON.stringify(response.data, null, 2),
               },
             ],
+          };
+        }
+
+        case 'inspect_batch': {
+          const args = InspectBatchSchema.parse(request.params.arguments);
+          const all = await resolveUrls(args);
+          const urls = all.slice(0, args.limit);
+          const results = await searchConsole.indexInspectBatch(args.siteUrl, urls, args.languageCode, args.concurrency);
+
+          const byCoverageState: Record<string, number> = {};
+          for (const r of results) {
+            const key = r.error ? 'Error' : (r.coverageState ?? 'Unknown');
+            byCoverageState[key] = (byCoverageState[key] ?? 0) + 1;
+          }
+          const notIndexed = results.filter((r) => !r.error && r.verdict !== 'PASS').map((r) => ({ url: r.url, coverageState: r.coverageState, lastCrawlTime: r.lastCrawlTime }));
+
+          return {
+            content: [
+              {
+                type: 'text',
+                text: JSON.stringify(
+                  {
+                    siteUrl: args.siteUrl,
+                    matched: all.length,
+                    inspected: urls.length,
+                    ...(all.length > urls.length ? { skipped: all.length - urls.length, note: `Raise limit (max 200) to inspect the rest.` } : {}),
+                    byCoverageState,
+                    notIndexed,
+                    canonicalMismatches: results.filter((r) => r.canonicalMismatch).map((r) => ({ url: r.url, googleCanonical: r.googleCanonical, userCanonical: r.userCanonical })),
+                    errors: results.filter((r) => r.error).map((r) => ({ url: r.url, error: r.error })),
+                    results,
+                  },
+                  null,
+                  2,
+                ),
+              },
+            ],
+          };
+        }
+
+        case 'indexnow_submit': {
+          const args = IndexNowSubmitSchema.parse(request.params.arguments);
+          const urls = await resolveUrls(args);
+          if (urls.length === 0) {
+            throw new Error('No URLs to submit (check sitemapUrl and lastmodOnOrAfter)');
+          }
+          const result = await submitIndexNow({
+            host: args.host,
+            key: args.key,
+            keyLocation: args.keyLocation,
+            endpoint: args.endpoint,
+            urls,
+          });
+          return {
+            content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
+            ...(result.ok ? {} : { isError: true }),
           };
         }
 

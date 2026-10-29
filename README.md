@@ -153,6 +153,44 @@ Get comprehensive search performance data from Google Search Console with enhanc
 }
 ```
 
+### submit_sitemap
+
+Submits or resubmits a sitemap. Resubmitting after a deploy is how Google learns that `<lastmod>` dates changed. The server requests the `webmasters` scope, so this works when the service account has **Full** or **Owner** permission on the property; a Restricted account can still use every read tool.
+
+```json
+{ "siteUrl": "sc-domain:example.com", "feedpath": "https://example.com/sitemap.xml" }
+```
+
+### inspect_batch
+
+Runs the URL Inspection API over many URLs and returns a summary: counts by coverage state (indexed, crawled or discovered but not indexed, unknown to Google), the URLs that are not indexed, canonical mismatches and per-URL errors, then one row per URL. Takes URLs from `urls`, from `sitemapUrl`, or from the sitemap entries whose `<lastmod>` is on or after `lastmodOnOrAfter`. Read-only. `limit` (default 50, max 200) and `concurrency` (default 3) keep it inside the inspection quota of 2,000 a day and 600 a minute per property.
+
+**Example: check every page changed in today's deploy**
+
+```json
+{
+  "siteUrl": "sc-domain:example.com",
+  "sitemapUrl": "https://example.com/sitemap.xml",
+  "lastmodOnOrAfter": "2026-10-29",
+  "limit": 200
+}
+```
+
+### indexnow_submit
+
+Notifies the IndexNow engines (Bing, Yandex, Seznam, Naver and others; not Google) that URLs were added, changed or removed. Takes URLs the same way as `inspect_batch`. Needs the site's IndexNow key, which is public by design: the engines check it against `https://{host}/{key}.txt`. Every URL must be on `host`. It does not use the Google credentials.
+
+```json
+{
+  "host": "example.com",
+  "key": "your-indexnow-key",
+  "sitemapUrl": "https://example.com/sitemap.xml",
+  "lastmodOnOrAfter": "2026-10-29"
+}
+```
+
+**After a deploy:** `submit_sitemap` for each sitemap, then `indexnow_submit` with `lastmodOnOrAfter` set to the deploy date, then `inspect_batch` a few days later to see what was picked up. There is no API for Search Console's Request Indexing button; Google's Indexing API only accepts job-posting and livestream pages.
+
 ## License
 
 MIT
