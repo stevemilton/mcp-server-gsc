@@ -113,6 +113,50 @@ export const EnhancedSearchAnalyticsSchema = SearchAnalyticsSchema.extend({
   }).optional().describe('Custom thresholds for quick wins detection'),
 });
 
+// Where a batch tool gets its URLs: an explicit list, or a sitemap (optionally
+// only the entries whose <lastmod> is on or after a date, i.e. "what changed").
+const UrlSourceShape = {
+  urls: z.array(z.string().url()).optional().describe('Explicit list of fully-qualified URLs.'),
+  sitemapUrl: z
+    .string()
+    .url()
+    .optional()
+    .describe('Read URLs from this sitemap or sitemap index instead of (or as well as) `urls`.'),
+  lastmodOnOrAfter: z
+    .string()
+    .regex(/^\d{4}-\d{2}-\d{2}$/, 'Use YYYY-MM-DD')
+    .optional()
+    .describe('With sitemapUrl: keep only entries whose <lastmod> is this date or later (YYYY-MM-DD).'),
+};
+
+const hasUrlSource = (a: { urls?: string[]; sitemapUrl?: string }) => !!(a.urls?.length || a.sitemapUrl);
+
+export const InspectBatchSchema = GSCBaseSchema.extend({
+  ...UrlSourceShape,
+  limit: z
+    .number()
+    .int()
+    .min(1)
+    .max(200)
+    .default(50)
+    .describe('Inspect at most this many URLs (URL Inspection quota: 2,000 a day, 600 a minute per property).'),
+  concurrency: z.number().int().min(1).max(5).default(3).describe('Inspections in flight at once.'),
+  languageCode: z.string().optional().default('en-US'),
+}).refine(hasUrlSource, { message: 'Pass urls, sitemapUrl, or both' });
+
+export const IndexNowSubmitSchema = z
+  .object({
+    host: z.string().describe('The site host, e.g. example.com. Every URL must be on it.'),
+    key: z
+      .string()
+      .min(8)
+      .describe('The IndexNow key. Public by design: the engines check it against keyLocation on the site.'),
+    keyLocation: z.string().url().optional().describe('Defaults to https://{host}/{key}.txt'),
+    endpoint: z.string().url().optional().describe('Defaults to https://api.indexnow.org/indexnow'),
+    ...UrlSourceShape,
+  })
+  .refine(hasUrlSource, { message: 'Pass urls, sitemapUrl, or both' });
+
 export type SearchAnalytics = z.infer<typeof SearchAnalyticsSchema>;
 export type EnhancedSearchAnalytics = z.infer<typeof EnhancedSearchAnalyticsSchema>;
 export type QuickWinsDetection = z.infer<typeof QuickWinsDetectionSchema>;

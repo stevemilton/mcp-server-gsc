@@ -9,6 +9,29 @@ type SubmitSitemapRequest = webmasters_v3.Params$Resource$Sitemaps$Submit;
 type IndexInspectRequest =
   searchconsole_v1.Params$Resource$Urlinspection$Index$Inspect['requestBody'];
 
+/**
+ * The read-write scope. Reads work with it at any permission level; writes
+ * (submit_sitemap) are still refused by Search Console unless the account has
+ * Full or Owner permission on the property. With the read-only scope a write
+ * failed even for a Full user, so submit_sitemap could never succeed.
+ */
+const WEBMASTERS_SCOPE = 'https://www.googleapis.com/auth/webmasters';
+
+export interface InspectionSummary {
+  url: string;
+  verdict?: string | null;
+  coverageState?: string | null;
+  indexingState?: string | null;
+  robotsTxtState?: string | null;
+  pageFetchState?: string | null;
+  lastCrawlTime?: string | null;
+  googleCanonical?: string | null;
+  userCanonical?: string | null;
+  canonicalMismatch: boolean;
+  inspectionResultLink?: string | null;
+  error?: string;
+}
+
 export class SearchConsoleService {
   private auth: GoogleAuth;
 
@@ -23,12 +46,12 @@ export class SearchConsoleService {
       }
       this.auth = new google.auth.GoogleAuth({
         credentials: parsed,
-        scopes: ['https://www.googleapis.com/auth/webmasters.readonly'],
+        scopes: [WEBMASTERS_SCOPE],
       });
     } else {
       this.auth = new google.auth.GoogleAuth({
         keyFile: credentials,
-        scopes: ['https://www.googleapis.com/auth/webmasters.readonly'],
+        scopes: [WEBMASTERS_SCOPE],
       });
     }
   }
@@ -244,5 +267,53 @@ export class SearchConsoleService {
   async indexInspect(requestBody: IndexInspectRequest) {
     const searchConsole = await this.getSearchConsole();
     return searchConsole.urlInspection.index.inspect({ requestBody });
+  }
+
+  /**
+   * Inspect many URLs with a small worker pool, returning one summary row per
+   * URL in input order. A failure on one URL (quota, URL outside the property)
+   * is reported on its row and does not stop the rest.
+   */
+  async indexInspectBatch(
+    siteUrl: string,
+    urls: string[],
+    languageCode = 'en-US',
+    concurrency = 3,
+  ): Promise<InspectionSummary[]> {
+    const searchConsole = await this.getSearchConsole();
+    const results: InspectionSummary[] = new Array(urls.length);
+    let next = 0;
+
+    const worker = async () => {
+      while (next < urls.length) {
+        const i = next++;
+        const url = urls[i];
+        try {
+          const res = await searchConsole.urlInspection.index.inspect({
+            requestBody: { siteUrl, inspectionUrl: url, languageCode },
+          });
+          const r = res.data.inspectionResult;
+          const s = r?.indexStatusResult;
+          results[i] = {
+            url,
+            verdict: s?.verdict,
+            coverageState: s?.coverageState,
+            indexingState: s?.indexingState,
+            robotsTxtState: s?.robotsTxtState,
+            pageFetchState: s?.pageFetchState,
+            lastCrawlTime: s?.lastCrawlTime,
+            googleCanonical: s?.googleCanonical,
+            userCanonical: s?.userCanonical,
+            canonicalMismatch: !!(s?.googleCanonical && s?.userCanonical && s.googleCanonical !== s.userCanonical),
+            inspectionResultLink: r?.inspectionResultLink,
+          };
+        } catch (err) {
+          results[i] = { url, canonicalMismatch: false, error: err instanceof Error ? err.message : String(err) };
+        }
+      }
+    };
+
+    await Promise.all(Array.from({ length: Math.min(concurrency, urls.length) }, worker));
+    return results;
   }
 }
